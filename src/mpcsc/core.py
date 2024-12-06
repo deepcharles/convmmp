@@ -78,35 +78,17 @@ def correlate_with_dict_sp(dictionary, time_idxs, atom_idxs, signal):
     return out
 
 
-def create_linear_op(dictionary, time_idxs, atom_idxs, n_samples, n_dims):
-    def apply_A(active_vals):
-        signal = convolve_with_dict_sp(
-            dictionary=dictionary,
-            time_idxs=time_idxs,
-            atom_idxs=atom_idxs,
-            active_vals=active_vals,
-            n_samples=n_samples,
-        )
-        return signal.flatten()
-
-    def apply_At(signal):
-        n_dims = dictionary.shape[2]
-        active_vals = correlate_with_dict_sp(
-            dictionary=dictionary,
-            time_idxs=time_idxs,
-            atom_idxs=atom_idxs,
-            signal=signal.reshape(-1, n_dims),
-        )
-        return active_vals
-
-    n_nnz = time_idxs.shape[0]
-    op = LinearOperator(
-        shape=(n_samples * n_dims, n_nnz),
-        matvec=apply_A,
-        rmatvec=apply_At,
-        dtype=np.float64,
-    )
-    return op
+@njit
+def approx_signal(n_samples, dictionary, time_idxs, atom_idxs):
+    # place atoms with amplitude 1 at the correct locations
+    n_atoms, n_samples_atom, n_dims = dictionary.shape
+    approx = np.zeros((n_samples, n_dims), dtype=np.float64)
+    for k_atom in range(time_idxs.size):
+        start = time_idxs[k_atom]
+        end = start + n_samples_atom
+        atom = dictionary[atom_idxs[k_atom]]
+        approx[start:end] += atom
+    return approx
 
 
 def csc_single_path(signal, dictionary, path, distance=20, debug=False):
@@ -145,15 +127,12 @@ def csc_single_path(signal, dictionary, path, distance=20, debug=False):
         selected_atom_idxs.append(atom_idxs[path_element])
 
         # update the residual
-        conv_op = create_linear_op(
-            dictionary=dictionary,
+        approx = approx_signal(
+            n_samples,
+            dictionary,
             atom_idxs=np.array(selected_atom_idxs),
             time_idxs=np.array(selected_time_idxs),
-            n_samples=n_samples,
-            n_dims=n_dims,
         )
-        active_vals, *_ = lsqr(conv_op, signal.flatten())
-        approx = (conv_op @ active_vals).reshape(n_samples, n_dims)
         residual = signal - approx
         mse = np.square(residual).mean()
         k_iter += 1
@@ -167,7 +146,7 @@ def csc_single_path(signal, dictionary, path, distance=20, debug=False):
     if debug:
         return approx, selected_time_idxs, selected_atom_idxs, residual_list
 
-    return approx, selected_time_idxs, selected_atom_idxs, active_vals
+    return approx, selected_time_idxs, selected_atom_idxs
 
 
 csc_single_path_delayed = delayed(csc_single_path)
@@ -211,20 +190,18 @@ def multipathcsc(
         all_squared_errors.append(se)
 
     k_best = np.argmin(all_squared_errors)
-    approx, selected_time_idxs, selected_atom_idxs, active_vals = all_results[k_best]
+    approx, selected_time_idxs, selected_atom_idxs = all_results[k_best]
     path = all_paths[k_best]
     if debug:
         return (
             approx,
             np.array(selected_time_idxs),
             np.array(selected_atom_idxs),
-            np.array(active_vals),
             path,
         ), dict(squared_error=all_squared_errors[k_best], k_path=k_best)
     return (
         approx,
         np.array(selected_time_idxs),
         np.array(selected_atom_idxs),
-        np.array(active_vals),
         path,
     )
